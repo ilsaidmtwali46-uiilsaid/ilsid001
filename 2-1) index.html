@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#4a8268">
+<title>التطبيق</title>
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- الشريط العلوي -->
+<header class="top">
+  <div class="datetime" id="dtDisplay"></div>
+</header>
+
+<main id="app"></main>
+
+<footer class="footer">تصميم وتطوير: السيد متولي للبرمجة - واتساب: <bdi dir="ltr">&nbsp;01115197980</bdi></footer>
+
+<script src="globals.js"></script>
+<script src="db.js"></script>
+<script src="license.js"></script>
+<script src="setup.js"></script>
+<script src="parties.js"></script>
+<script src="purchases.js"></script>
+<script src="inventory.js"></script>
+<script src="suppliers.js"></script>
+<script src="customers.js"></script>
+<script src="stocktake.js"></script>
+<script src="daily.js"></script>
+
+<script>
+// ===================== شاشة البيع =====================
+Screens.sale = {
+  cart: {}, q: '', ret: false,
+  items(){ return Object.keys(this.cart).map(id => ({id, qty:this.cart[id]})); },
+  total(){ return DB.round(this.items().reduce((s,i) => s + (DB.getProduct(i.id)||{price:0}).price * i.qty, 0)); },
+  render(el){
+    el.innerHTML = `<button class="btn gray noprint" onclick="go('home')" style="margin-bottom:10px">⬅️ رجوع للرئيسية</button>
+    <div class="sale"><section>
+      <button class="btn warn" id="retBtn"></button>
+      <input class="inp" id="q" placeholder="🔍 اكتب اسم الصنف هنا" value="${DB.esc(this.q)}">
+      <div class="grid" id="grid"></div></section><aside class="cart" id="cart"></aside></div>`;
+    el.querySelector('#retBtn').onclick = () => { this.ret = !this.ret; this.cart = {}; this.drawCart(); };
+    el.querySelector('#q').oninput = e => { this.q = e.target.value; this.drawGrid(); };
+    el.querySelector('#grid').onclick = e => { const c = e.target.closest('.card'); if (c) this.add(c.dataset.id); };
+    el.querySelector('#cart').onclick = e => {
+      const b = e.target.closest('[data-act]'); if (!b) return;
+      const id = b.dataset.id, a = b.dataset.act;
+      if (a === 'plus') this.add(id);
+      else if (a === 'minus') { this.cart[id] = DB.round(this.cart[id]-1); if (this.cart[id] <= 0) delete this.cart[id]; this.drawCart(); }
+      else if (a === 'del') { delete this.cart[id]; this.drawCart(); }
+      else if (a === 'cash') this.cash();
+      else if (a === 'credit') this.credit();
+    };
+    this.drawGrid(); this.drawCart();
+  },
+  drawGrid(){
+    const q = this.q.trim().toLowerCase();
+    const list = DB.list('products').filter(p => !q || p.name.toLowerCase().includes(q) || String(p.code).toLowerCase().includes(q));
+    document.getElementById('grid').innerHTML = list.length ? list.map(p => UI.card(p)).join('') : '<p class="big">لا توجد أصناف</p>';
+  },
+  add(id){
+    const p = DB.getProduct(id), cur = this.cart[id] || 0;
+    if (!p) return;
+    if (!this.ret && cur + 1 > p.qty) return UI.toast('الكمية المتاحة لا تكفي', true);
+    this.cart[id] = DB.round(cur + 1);
+    this.drawCart();
+  },
+  drawCart(){
+    const its = this.items(), t = this.total(), r = this.ret;
+    const rows = its.map(i => {
+      const p = DB.getProduct(i.id);
+      return `<div class="line"><div class="n">${DB.esc(p.name)}<br>${DB.money(p.price*i.qty)}</div>
+        <button data-act="minus" data-id="${i.id}">−</button><b>${i.qty}</b>
+        <button data-act="plus" data-id="${i.id}">+</button>
+        <button data-act="del" data-id="${i.id}" style="color:var(--bad)">✖</button></div>`;
+    }).join('');
+    const cart = document.getElementById('cart');
+    cart.className = 'cart' + (r ? ' ret' : '');
+    document.getElementById('retBtn').textContent = r ? '🛒 رجوع للبيع العادي' : '↩️ مرتجع بيع';
+    cart.innerHTML = `<h2>${r ? '↩️ فاتورة مرتجع' : '🧺 الفاتورة'}</h2>
+      ${rows || '<p class="big">اضغط على صورة الصنف لإضافته</p>'}
+      <div class="total">${DB.money(t)}</div>
+      <button class="btn ${r ? 'warn' : 'ok'}" data-act="cash">${r ? '💵 رد المبلغ نقداً' : '💵 بيع نقدي'}</button>
+      <button class="btn" data-act="credit">${r ? '📒 خصم من حساب عميل' : '📒 بيع آجل'}</button>`;
+  },
+  done(msg){ this.cart = {}; this.drawCart(); this.drawGrid(); UI.toast(msg); },
+  cash(){
+    if (!this.items().length) return UI.toast('الفاتورة فارغة', true);
+    let r = this.ret ? DB.returnSale(this.items(), 'cash') : DB.completeSale(this.items(), 'cash');
+    if (r.error) return UI.toast(r.error, true);
+    this.done(this.ret ? 'تم المرتجع ✔' : 'تم البيع ✔');
+  },
+  credit(){
+    if (!this.items().length) return UI.toast('الفاتورة فارغة', true);
+    const custs = DB.list('customers');
+    const m = UI.modal(`<h2>اختر العميل</h2>
+      ${custs.map(c => `<button class="btn" data-c="${c.id}">${DB.esc(c.name)}<br><small>عليه: ${DB.money(c.balance)}</small></button>`).join('')}
+      <h2>➕ عميل جديد</h2>
+      <input class="inp" id="cn" placeholder="الاسم"><input class="inp" id="cp" type="tel" placeholder="رقم الهاتف">
+      <button class="btn ok" id="cadd">حفظ وإتمام</button><button class="btn gray" id="cx">رجوع</button>`);
+    const sell = id => {
+      let r = this.ret ? DB.returnSale(this.items(), 'credit', id) : DB.completeSale(this.items(), 'credit', id);
+      if (r.error) return UI.toast(r.error, true);
+      m.close(); this.done(this.ret ? 'تم الخصم ✔' : 'تم البيع آجل ✔');
+    };
+    m.querySelectorAll('[data-c]').forEach(b => b.onclick = () => sell(b.dataset.c));
+    m.querySelector('#cx').onclick = () => m.close();
+    m.querySelector('#cadd').onclick = () => {
+      const n = m.querySelector('#cn').value.trim();
+      if (!n) return UI.toast('اكتب اسم العميل', true);
+      sell(DB.addCustomer({ name:n, phone:m.querySelector('#cp').value.trim(), address:'', balance:0, notes:'' }).id);
+    };
+  }
+};
+
+// ===================== الشاشة الرئيسية (الداشبورد) =====================
+Screens.home = {
+  render(el){
+    el.innerHTML = `
+      <div class="dashboard">
+        <div class="dash-grid">
+          <!-- العمود الأيمن -->
+          <div class="dash-col">
+            <button class="dash-btn" onclick="go('sale')">
+              <span class="dash-icon">🛒</span> <span class="dash-text">البيع</span>
+            </button>
+            <button class="dash-btn" onclick="go('purchases')">
+              <span class="dash-icon">📥</span> <span class="dash-text">المشتريات</span>
+            </button>
+            <button class="dash-btn" onclick="go('inventory')">
+              <span class="dash-icon">📦</span> <span class="dash-text">المخزون</span>
+            </button>
+            <button class="dash-btn" onclick="go('daily')">
+              <span class="dash-icon">📊</span> <span class="dash-text">كشف اليوم</span>
+            </button>
+          </div>
+
+          <!-- العمود الأيسر -->
+          <div class="dash-col">
+            <button class="dash-btn" onclick="go('customers')">
+              <span class="dash-icon">👥</span> <span class="dash-text">العملاء</span>
+            </button>
+            <button class="dash-btn" onclick="go('suppliers')">
+              <span class="dash-icon">🚚</span> <span class="dash-text">الموردين</span>
+            </button>
+            <button class="dash-btn" onclick="go('stocktake')">
+              <span class="dash-icon">📋</span> <span class="dash-text">الجرد</span>
+            </button>
+            <button class="dash-btn" onclick="if(window.License) License.update()">
+              <span class="dash-icon">🔑</span> <span class="dash-text">الاشتراك</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- الشعار / اسم النشاط في النص -->
+        <div class="dash-logo">
+          <h2 id="title">《 اسم النشاط 》</h2>
+        </div>
+
+        <!-- أزرار سريعة تحت -->
+        <div class="dash-bottom-actions">
+          <button class="btn gray" style="margin:0" onclick="document.getElementById('themeBtn').click()">🎨 الألوان</button>
+          <button class="btn gray" style="margin:0" onclick="DB.exportBackup()">💾 نسخة احتياطية</button>
+          <button class="btn" style="margin:0; background:#25D366" onclick="window.open('https://wa.me/201115197980', '_blank')">💬 واتساب</button>
+        </div>
+      </div>
+    `;
+    if(window.License && License.info) {
+      License.show(); // تحديث اسم النشاط لو التفعيل موجود
+    }
+  }
+};
+
+// ===================== الثيمات =====================
+const THEMES = {
+  sage:  { n:'🌿 أخضر هادئ', '--bg':'#f3f6f1','--card':'#ffffff','--ink':'#2f3a35','--line':'#d5ddd3','--soft':'#e3efe7','--foot':'#3c4a46','--ok':'#4a8268','--blue':'#52799c','--warn':'#bf7a3f','--bad':'#b5524c' },
+  sky:   { n:'🌊 أزرق فاتح', '--bg':'#eef4f8','--card':'#ffffff','--ink':'#2c3a45','--line':'#d0dde6','--soft':'#e1edf5','--foot':'#37495a','--ok':'#4a8a8a','--blue':'#52799c','--warn':'#bf7a3f','--bad':'#b5524c' },
+  sand:  { n:'🏜️ رملي دافئ', '--bg':'#faf6ee','--card':'#fffdf8','--ink':'#3b3630','--line':'#e3dccb','--soft':'#f1ead8','--foot':'#4a433a','--ok':'#6f8a4f','--blue':'#6a7f9a','--warn':'#c27d3e','--bad':'#b5524c' },
+  night: { n:'🌙 ليلي مريح', '--bg':'#1f262b','--card':'#2a333a','--ink':'#e6ebe8','--line':'#3b464e','--soft':'#34413f','--foot':'#161c20','--ok':'#5a9a7c','--blue':'#5f8fb5','--warn':'#c98b4e','--bad':'#c0625c' }
+};
+
+function applyTheme(){
+  const t = DB.getTheme(), base = THEMES[t.name] || THEMES.sage;
+  const v = Object.assign({}, base);
+  if (t.bg) v['--bg'] = t.bg;
+  if (t.ok) v['--ok'] = t.ok;
+  Object.keys(v).forEach(k => { if (k[0] === '-') document.documentElement.style.setProperty(k, v[k]); });
+}
+
+// مودال الألوان
+const themeBtnHTML = `<button id="themeBtn" class="hide">ثيم</button>`;
+document.body.insertAdjacentHTML('beforeend', themeBtnHTML);
+document.getElementById('themeBtn').onclick = () => {
+  const m = UI.modal(`<h2>🎨 اختر الألوان</h2>
+    ${Object.keys(THEMES).map(k => `<button class="btn" data-t="${k}" style="background:${THEMES[k]['--ok']}">${THEMES[k].n}</button>`).join('')}
+    <button class="btn gray" id="cx">رجوع</button>`);
+  m.querySelectorAll('[data-t]').forEach(b => b.onclick = () => {
+    DB.setTheme({ name: b.dataset.t }); applyTheme(); m.close();
+  });
+  m.querySelector('#cx').onclick = () => m.close();
+};
+
+// ===================== التنقل =====================
+function go(name){
+  const app = document.getElementById('app'), s = Screens[name];
+  if (s) s.render(app);
+  window.scrollTo(0, 0);
+}
+
+function afterLicense(){
+  const app = document.getElementById('app');
+  if (!DB.isSetupDone()) {
+    Setup.render(app, afterLicense); return;
+  }
+  go('home'); // يفتح الشاشة الرئيسية
+}
+window.afterLicense = afterLicense;
+
+function boot(){
+  if (!window.License || typeof License.gate !== 'function') {
+    document.getElementById('app').innerHTML = '<div class="box"><h1>⚠️ تعذر تحميل نظام التفعيل</h1></div>';
+    return;
+  }
+  License.gate(afterLicense);
+}
+
+// تحديث الساعة
+function updateDateTime() {
+  const el = document.getElementById('dtDisplay');
+  if (!el) return;
+  const now = new Date();
+  const date = now.toLocaleDateString('ar-EG', { weekday: 'long', year: 'numeric', month: '2-digit', day: '2-digit' });
+  const time = now.toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' });
+  el.innerHTML = `📅 ${date} - ⏰ ${time}`;
+}
+setInterval(updateDateTime, 1000);
+updateDateTime();
+
+applyTheme();
+boot();
+</script>
+</body>
+</html>
